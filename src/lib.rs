@@ -128,6 +128,10 @@ impl NativeTdJson {
     /// safe to execute in this process. The first successful call permanently binds the process to
     /// this exact path and keeps the library loaded until process exit. No code may bypass this
     /// owner and call the library's JSON C ABI directly.
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "the assertion checks an internal ownership invariant, not a recoverable load error"
+    )]
     pub unsafe fn load(path: impl AsRef<Path>) -> Result<Self, TdJsonError> {
         let path = path.as_ref();
         if !path.is_absolute() {
@@ -289,40 +293,41 @@ struct TdJsonSymbols {
 fn load_symbols(library: &Library) -> Result<TdJsonSymbols, TdJsonError> {
     // SAFETY: every type below mirrors the corresponding declaration in td_json_client.h. The
     // process-global binding retains Library for longer than the copied function pointers.
-    unsafe {
-        Ok(TdJsonSymbols {
-            create_client_id: *library.get(b"td_create_client_id\0").map_err(|source| {
-                TdJsonError::MissingSymbol {
-                    symbol: "td_create_client_id",
-                    source,
-                }
-            })?,
-            send: *library
-                .get(b"td_send\0")
-                .map_err(|source| TdJsonError::MissingSymbol {
-                    symbol: "td_send",
-                    source,
-                })?,
-            receive: *library.get(b"td_receive\0").map_err(|source| {
-                TdJsonError::MissingSymbol {
-                    symbol: "td_receive",
-                    source,
-                }
-            })?,
-            execute: *library.get(b"td_execute\0").map_err(|source| {
-                TdJsonError::MissingSymbol {
-                    symbol: "td_execute",
-                    source,
-                }
-            })?,
-            set_log_message_callback: *library.get(b"td_set_log_message_callback\0").map_err(
-                |source| TdJsonError::MissingSymbol {
-                    symbol: "td_set_log_message_callback",
-                    source,
-                },
-            )?,
-        })
+    let create_client_id: TdCreateClientId = *unsafe { library.get(b"td_create_client_id\0") }
+        .map_err(|source| TdJsonError::MissingSymbol {
+            symbol: "td_create_client_id",
+            source,
+        })?;
+    let send: TdSend =
+        *unsafe { library.get(b"td_send\0") }.map_err(|source| TdJsonError::MissingSymbol {
+            symbol: "td_send",
+            source,
+        })?;
+    let receive: TdReceive =
+        *unsafe { library.get(b"td_receive\0") }.map_err(|source| TdJsonError::MissingSymbol {
+            symbol: "td_receive",
+            source,
+        })?;
+    let execute: TdExecute =
+        *unsafe { library.get(b"td_execute\0") }.map_err(|source| TdJsonError::MissingSymbol {
+            symbol: "td_execute",
+            source,
+        })?;
+    let set_log_message_callback: TdSetLogMessageCallback = *unsafe {
+        library.get(b"td_set_log_message_callback\0")
     }
+    .map_err(|source| TdJsonError::MissingSymbol {
+        symbol: "td_set_log_message_callback",
+        source,
+    })?;
+
+    Ok(TdJsonSymbols {
+        create_client_id,
+        send,
+        receive,
+        execute,
+        set_log_message_callback,
+    })
 }
 
 fn copy_native_response(response: *const c_char) -> Option<Vec<u8>> {
