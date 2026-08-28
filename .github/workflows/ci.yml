@@ -1,0 +1,28 @@
+name: Rust CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: taiki-e/install-action@nextest
+      - name: Check Rust crate
+        run: |
+          cargo fmt --check
+          cargo clippy --release --all-targets -- -D warnings
+          cargo nextest run --release --locked
+          cargo test --release --locked --doc
+      - name: Check shell syntax
+        run: bash -n scripts/*.sh

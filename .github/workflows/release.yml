@@ -1,0 +1,329 @@
+name: Release TDLib artifacts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.upstream.outputs.commit }}
+      version: ${{ steps.upstream.outputs.version }}
+      tag: ${{ steps.upstream.outputs.tag }}
+    steps:
+      - name: Resolve TDLib master once
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="${RUNNER_TEMP}/tdlib-source"
+          git init "${source_dir}"
+          git -C "${source_dir}" remote add origin https://github.com/tdlib/td.git
+          git -C "${source_dir}" fetch --depth 1 origin refs/heads/master
+          git -C "${source_dir}" checkout --detach FETCH_HEAD
+          commit=$(git -C "${source_dir}" rev-parse HEAD)
+          short_commit=${commit:0:12}
+          version=$(sed -nE 's/^project\(TDLib VERSION ([0-9]+\.[0-9]+\.[0-9]+) LANGUAGES CXX C\)$/\1/p' "${source_dir}/CMakeLists.txt")
+          test -n "${version}"
+          {
+            printf 'commit=%s\n' "${commit}"
+            printf 'version=%s\n' "${version}"
+            printf 'tag=tdjson-v%s-g%s-r%s\n' "${version}" "${short_commit}" "${GITHUB_RUN_NUMBER}"
+          } >> "${GITHUB_OUTPUT}"
+
+  quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: taiki-e/install-action@nextest
+      - name: Check Rust crate
+        run: |
+          cargo fmt --check
+          cargo clippy --release --all-targets -- -D warnings
+          cargo nextest run --release --locked
+          cargo test --release --locked --doc
+
+  build-linux:
+    needs:
+      - prepare
+      - quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-debian13-x86_64
+          - runner: ubuntu-24.04-arm
+            target: linux-debian13-aarch64
+    runs-on: ${{ matrix.runner }}
+    container: debian:13-slim
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            clang \
+            cmake \
+            curl \
+            git \
+            gperf \
+            jq \
+            libc++-dev \
+            libc++abi-dev \
+            libssl-dev \
+            make \
+            pkg-config \
+            zlib1g-dev \
+            zstd
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Build exact TDLib commit
+        run: |
+          scripts/build_tdjson.sh \
+            "${{ needs.prepare.outputs.commit }}" \
+            "${{ needs.prepare.outputs.version }}" \
+            "${RUNNER_TEMP}/tdlib-source" \
+            "${RUNNER_TEMP}/tdlib-install"
+      - name: Package native artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          compiler=$(clang++ --version)
+          compiler=${compiler%%$'\n'*}
+          test -n "${compiler}"
+          scripts/package_tdjson.sh \
+            "${RUNNER_TEMP}/tdlib-install" \
+            "${RUNNER_TEMP}/tdlib-source" \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ needs.prepare.outputs.commit }}" \
+            "${{ matrix.target }}" \
+            "${compiler}" \
+            dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.zst
+            dist/*.metadata.json
+          if-no-files-found: error
+
+  build-macos:
+    needs:
+      - prepare
+      - quality
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Install build dependencies
+        run: brew install cmake gperf jq openssl@3 zstd
+      - name: Build exact TDLib commit
+        run: |
+          scripts/build_tdjson.sh \
+            "${{ needs.prepare.outputs.commit }}" \
+            "${{ needs.prepare.outputs.version }}" \
+            "${RUNNER_TEMP}/tdlib-source" \
+            "${RUNNER_TEMP}/tdlib-install" \
+            "-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" \
+            -DOPENSSL_USE_STATIC_LIBS=TRUE
+      - name: Package native artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          compiler=$(clang++ --version)
+          compiler=${compiler%%$'\n'*}
+          test -n "${compiler}"
+          openssl_prefix=$(brew --prefix openssl@3)
+          OPENSSL_LICENSE_FILE="${openssl_prefix}/LICENSE.txt" scripts/package_tdjson.sh \
+            "${RUNNER_TEMP}/tdlib-install" \
+            "${RUNNER_TEMP}/tdlib-source" \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ needs.prepare.outputs.commit }}" \
+            macos-arm64 \
+            "${compiler}" \
+            dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-arm64
+          path: |
+            dist/*.tar.zst
+            dist/*.metadata.json
+          if-no-files-found: error
+
+  verify-linux:
+    needs:
+      - prepare
+      - build-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-debian13-x86_64
+          - runner: ubuntu-24.04-arm
+            target: linux-debian13-aarch64
+    runs-on: ${{ matrix.runner }}
+    container: debian:13-slim
+    steps:
+      - name: Install consumer dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            clang \
+            curl \
+            jq \
+            libc++1 \
+            libc++abi1 \
+            libssl3t64 \
+            libunwind-19 \
+            zlib1g \
+            zstd
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.target }}
+          path: artifact
+      - name: Verify final Linux artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(find artifact -type f -name '*.tar.zst' -print -quit)
+          library=$(scripts/verify_tdjson_artifact.sh \
+            "${archive}" \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ needs.prepare.outputs.commit }}" \
+            "${{ matrix.target }}" \
+            "${RUNNER_TEMP}/consumer-artifact" \
+            Linux)
+          native_tests=$(cargo test --release --locked --test native -- --ignored --list)
+          [[ "${native_tests}" == *'loads_identity_callback_and_client_lifecycle: test'* ]]
+          TDJSON_LIBRARY="${library}" \
+          TDJSON_EXPECTED_VERSION="${{ needs.prepare.outputs.version }}" \
+          TDJSON_EXPECTED_COMMIT="${{ needs.prepare.outputs.commit }}" \
+          cargo test --release --locked --test native -- --ignored --exact loads_identity_callback_and_client_lifecycle
+
+  verify-macos:
+    needs:
+      - prepare
+      - build-macos
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Install consumer dependencies
+        run: brew install jq zstd
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-arm64
+          path: artifact
+      - name: Verify final macOS artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(find artifact -type f -name '*.tar.zst' -print -quit)
+          library=$(scripts/verify_tdjson_artifact.sh \
+            "${archive}" \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ needs.prepare.outputs.commit }}" \
+            macos-arm64 \
+            "${RUNNER_TEMP}/consumer-artifact" \
+            Darwin)
+          native_tests=$(cargo test --release --locked --test native -- --ignored --list)
+          [[ "${native_tests}" == *'loads_identity_callback_and_client_lifecycle: test'* ]]
+          TDJSON_LIBRARY="${library}" \
+          TDJSON_EXPECTED_VERSION="${{ needs.prepare.outputs.version }}" \
+          TDJSON_EXPECTED_COMMIT="${{ needs.prepare.outputs.commit }}" \
+          cargo test --release --locked --test native -- --ignored --exact loads_identity_callback_and_client_lifecycle
+
+  release:
+    needs:
+      - prepare
+      - quality
+      - build-linux
+      - build-macos
+      - verify-linux
+      - verify-macos
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: release-inputs
+          merge-multiple: true
+      - name: Build release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          metadata=(release-inputs/*.metadata.json)
+          archives=(release-inputs/*.tar.zst)
+          [[ ${#metadata[@]} -eq 3 ]]
+          [[ ${#archives[@]} -eq 3 ]]
+          expected_targets='["linux-debian13-aarch64","linux-debian13-x86_64","macos-arm64"]'
+          actual_targets=$(jq -s -c 'map(.target) | sort' "${metadata[@]}")
+          [[ "${actual_targets}" == "${expected_targets}" ]]
+          short_commit='${{ needs.prepare.outputs.commit }}'
+          short_commit=${short_commit:0:12}
+          for metadata_file in "${metadata[@]}"; do
+            jq -e \
+              --arg version "${{ needs.prepare.outputs.version }}" \
+              --arg commit "${{ needs.prepare.outputs.commit }}" \
+              '.tdlib_version == $version and .tdlib_commit == $commit' \
+              "${metadata_file}" \
+              > /dev/null
+            target=$(jq -er '.target' "${metadata_file}")
+            file=$(jq -er '.file' "${metadata_file}")
+            expected_file="tdjson-v${{ needs.prepare.outputs.version }}-g${short_commit}-${target}.tar.zst"
+            [[ "${file}" == "${expected_file}" ]]
+            expected_sha256=$(jq -er '.sha256' "${metadata_file}")
+            actual_sha256=$(sha256sum "release-inputs/${file}")
+            actual_sha256=${actual_sha256%% *}
+            [[ "${actual_sha256}" == "${expected_sha256}" ]]
+          done
+          mkdir -p dist
+          cp "${archives[@]}" dist/
+          jq -s \
+            --arg tdlib_version "${{ needs.prepare.outputs.version }}" \
+            --arg tdlib_commit "${{ needs.prepare.outputs.commit }}" \
+            --arg builder_commit "${GITHUB_SHA}" \
+            '{format_version: 1, tdlib_version: $tdlib_version, tdlib_commit: $tdlib_commit, builder_commit: $builder_commit, artifacts: sort_by(.target)}' \
+            "${metadata[@]}" \
+            > dist/manifest.json
+          (cd dist && sha256sum -- *.tar.zst > SHA256SUMS)
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TDLIB_COMMIT: ${{ needs.prepare.outputs.commit }}
+          TDLIB_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          notes="TDLib ${TDLIB_VERSION} built from ${TDLIB_COMMIT} on Linux x86_64, Linux ARM64, and macOS ARM64."
+          gh release create "${RELEASE_TAG}" \
+            dist/*.tar.zst \
+            dist/manifest.json \
+            dist/SHA256SUMS \
+            --draft \
+            --latest=false \
+            --target "${GITHUB_SHA}" \
+            --title "${RELEASE_TAG}" \
+            --notes "${notes}"
+          gh release edit "${RELEASE_TAG}" --draft=false --latest=false
