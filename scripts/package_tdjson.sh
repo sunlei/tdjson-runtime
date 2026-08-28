@@ -19,6 +19,7 @@ package_name="tdjson-v${version}-g${short_commit}-${target}"
 package_dir="$dist_dir/$package_name"
 archive="$dist_dir/$package_name.tar.zst"
 metadata="$dist_dir/$target.metadata.json"
+shopt -s nullglob
 
 if [[ -e "$dist_dir" ]]; then
     printf 'distribution directory already exists: %s\n' "$dist_dir" >&2
@@ -43,12 +44,22 @@ case $(uname -s) in
             exit 2
         fi
         cp "$OPENSSL_LICENSE_FILE" "$package_dir/OPENSSL-LICENSE.txt"
-        cp -a "$install_dir"/lib/libtdjson*.dylib "$package_dir/lib/"
+        libraries=("$install_dir"/lib/libtdjson*.dylib)
+        if [[ ${#libraries[@]} -eq 0 ]]; then
+            printf 'TDLib install contains no macOS shared library in %s\n' "$install_dir/lib" >&2
+            exit 2
+        fi
+        cp -a "${libraries[@]}" "$package_dir/lib/"
         library=$(find "$package_dir/lib" -type f -name 'libtdjson*.dylib' -print -quit)
         otool -L "$library" > "$package_dir/DYNAMIC_DEPENDENCIES.txt"
         ;;
     Linux)
-        cp -a "$install_dir"/lib/libtdjson.so* "$package_dir/lib/"
+        libraries=("$install_dir"/lib/libtdjson.so*)
+        if [[ ${#libraries[@]} -eq 0 ]]; then
+            printf 'TDLib install contains no Linux shared library in %s\n' "$install_dir/lib" >&2
+            exit 2
+        fi
+        cp -a "${libraries[@]}" "$package_dir/lib/"
         library=$(find "$package_dir/lib" -type f -name 'libtdjson.so.*' -print -quit)
         ldd "$library" > "$package_dir/DYNAMIC_DEPENDENCIES.txt"
         ;;

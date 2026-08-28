@@ -33,7 +33,9 @@ The first successful `NativeTdJson::load` permanently binds the process to that 
 the library remains loaded until process exit. At most one thread-bound owner can exist at a time.
 Its mutable methods serialize the process-global JSON interface, `receive` accepts a
 `std::time::Duration`, and response bytes are copied before another native call can invalidate
-them. Dropping the owner releases access but does not close TDLib clients.
+them. A blocking `receive` also prevents `send` through this owner, so applications should use a
+bounded receive duration and interleave sends. Dropping the owner releases access but does not
+close TDLib clients.
 
 The optional native log callback is removed when its owner is dropped, but removal does not wait
 for an invocation already in progress. The callback and everything it accesses must therefore
@@ -58,8 +60,9 @@ library, TDLib's license, and its dynamic dependency report. The macOS archive a
 license for its statically linked OpenSSL.
 
 Linux artifacts are validated in a fresh Debian 13 slim consumer with the runtime packages
-`libc++1`, `libc++abi1`, `libunwind-19`, `libssl3t64`, and `zlib1g` installed. Compatibility with
-other distributions is not implied; use the archive's dependency report to evaluate another
+`libc++1`, `libc++abi1`, `libunwind-19`, `libssl3t64`, and `zlib1g` installed. Dynamic dependencies
+are checked before installing the compiler used to build the native test process. Compatibility
+with other distributions is not implied; use the archive's dependency report to evaluate another
 consumer environment. macOS artifacts statically link Homebrew OpenSSL and are rejected unless all
 remaining install names refer to the artifact itself or Apple system libraries.
 

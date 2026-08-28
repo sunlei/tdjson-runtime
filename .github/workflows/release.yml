@@ -48,6 +48,8 @@ jobs:
           cargo clippy --release --all-targets -- -D warnings
           cargo nextest run --release --locked
           cargo test --release --locked --doc
+      - name: Check shell syntax
+        run: bash -n scripts/*.sh
 
   build-linux:
     needs:
@@ -83,9 +85,6 @@ jobs:
             zlib1g-dev \
             zstd
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
       - name: Build exact TDLib commit
         run: |
           scripts/build_tdjson.sh \
@@ -123,9 +122,6 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
       - name: Install build dependencies
         run: brew install cmake gperf jq openssl@3 zstd
       - name: Build exact TDLib commit
@@ -181,8 +177,6 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             ca-certificates \
-            clang \
-            curl \
             jq \
             libc++1 \
             libc++abi1 \
@@ -191,14 +185,12 @@ jobs:
             zlib1g \
             zstd
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
       - uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.target }}
           path: artifact
-      - name: Verify final Linux artifact
+      - name: Verify Linux runtime dependencies
+        id: artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -210,9 +202,19 @@ jobs:
             "${{ matrix.target }}" \
             "${RUNNER_TEMP}/consumer-artifact" \
             Linux)
+          printf 'library=%s\n' "${library}" >> "${GITHUB_OUTPUT}"
+      - name: Install native test toolchain
+        run: apt-get install -y --no-install-recommends clang curl
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Test final Linux artifact
+        shell: bash
+        run: |
+          set -euo pipefail
           native_tests=$(cargo test --release --locked --test native -- --ignored --list)
           [[ "${native_tests}" == *'loads_identity_callback_and_client_lifecycle: test'* ]]
-          TDJSON_LIBRARY="${library}" \
+          TDJSON_LIBRARY="${{ steps.artifact.outputs.library }}" \
           TDJSON_EXPECTED_VERSION="${{ needs.prepare.outputs.version }}" \
           TDJSON_EXPECTED_COMMIT="${{ needs.prepare.outputs.commit }}" \
           cargo test --release --locked --test native -- --ignored --exact loads_identity_callback_and_client_lifecycle

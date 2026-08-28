@@ -6,3 +6,5 @@
 - Validate release archives after extraction in the declared consumer environment. Checks against
   a build install tree cannot detect missing files, unresolved runtime dependencies, or embedded
   loader paths in the published archive.
+- Keep raw protocol passthrough APIs raw, and interpret structured error responses in typed helpers
+  so diagnostics are preserved without changing the low-level response contract.

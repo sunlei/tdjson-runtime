@@ -105,6 +105,15 @@ fn loads_identity_callback_and_client_lifecycle() {
             .install_log_message_callback(1, record_log_message)
             .expect("callback ownership must be released on Drop");
     }
+    let response = second
+        .execute(
+            br#"{"@type":"addLogMessage","verbosity_level":1,"text":"tdjson-runtime-native-callback"}"#,
+        )
+        .expect("addLogMessage must execute after callback ownership is reacquired");
+    let response: Value = serde_json::from_slice(&response).expect("response must be valid JSON");
+
+    assert_eq!(response["@type"], "ok");
+    assert_eq!(CALLBACK_COUNT.load(Ordering::Relaxed), 2);
 }
 
 unsafe extern "C" fn record_log_message(_verbosity_level: c_int, message: *const c_char) {

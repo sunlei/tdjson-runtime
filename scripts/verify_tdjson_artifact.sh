@@ -40,6 +40,10 @@ jq -e \
 case "$host_os" in
     Linux)
         library=$(find "$package_dir/lib" -type f -name 'libtdjson.so.*' -print -quit)
+        if [[ -z "$library" ]]; then
+            printf 'Linux artifact contains no libtdjson shared library in %s\n' "$package_dir/lib" >&2
+            exit 2
+        fi
         dependencies=$(ldd "$library")
         if [[ "$dependencies" == *'not found'* ]]; then
             printf 'artifact has unresolved dynamic dependencies:\n%s\n' "$dependencies" >&2
@@ -48,6 +52,10 @@ case "$host_os" in
         ;;
     Darwin)
         library=$(find "$package_dir/lib" -type f -name 'libtdjson*.dylib' -print -quit)
+        if [[ -z "$library" ]]; then
+            printf 'macOS artifact contains no libtdjson shared library in %s\n' "$package_dir/lib" >&2
+            exit 2
+        fi
         dependencies=$(otool -L "$library")
         dependencies=${dependencies#*$'\n'}
         is_library_id=true

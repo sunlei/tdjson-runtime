@@ -99,6 +99,9 @@ pub enum TdJsonError {
     /// A synchronous TDLib response was not valid JSON.
     #[error("td_execute returned invalid JSON")]
     InvalidJson(#[source] serde_json::Error),
+    /// TDLib rejected a typed synchronous request.
+    #[error("TDLib error {code}: {message}")]
+    TdLib { code: i32, message: String },
     /// `getOption` did not return the documented string variant.
     #[error("getOption({option}) did not return optionValueString with a string value")]
     InvalidOptionResponse { option: &'static str },
@@ -121,9 +124,10 @@ impl NativeTdJson {
     /// # Safety
     ///
     /// `path` must identify a trusted library whose exported functions match TDLib's current JSON
-    /// C ABI. Its initialization code must be safe to execute in this process. The first successful
-    /// call permanently binds the process to this exact path and keeps the library loaded until
-    /// process exit. No code may bypass this owner and call the library's JSON C ABI directly.
+    /// C ABI. Its initialization code and, if symbol loading fails, its termination code must be
+    /// safe to execute in this process. The first successful call permanently binds the process to
+    /// this exact path and keeps the library loaded until process exit. No code may bypass this
+    /// owner and call the library's JSON C ABI directly.
     pub unsafe fn load(path: impl AsRef<Path>) -> Result<Self, TdJsonError> {
         let path = path.as_ref();
         if !path.is_absolute() {
@@ -247,17 +251,8 @@ impl NativeTdJson {
         request: &'static [u8],
     ) -> Result<String, TdJsonError> {
         let response = self.execute(request)?;
-        std::str::from_utf8(&response).map_err(TdJsonError::InvalidUtf8)?;
-        let response: Value =
-            serde_json::from_slice(&response).map_err(TdJsonError::InvalidJson)?;
-        if response.get("@type").and_then(Value::as_str) != Some("optionValueString") {
-            return Err(TdJsonError::InvalidOptionResponse { option });
-        }
-        response
-            .get("value")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or(TdJsonError::InvalidOptionResponse { option })
+        let response = std::str::from_utf8(&response).map_err(TdJsonError::InvalidUtf8)?;
+        parse_string_option_response(option, response)
     }
 }
 
@@ -338,4 +333,52 @@ fn copy_native_response(response: *const c_char) -> Option<Vec<u8>> {
     // SAFETY: TDLib promises a non-null response is a null-terminated string valid until the next
     // receive or execute call. The owned copy is completed before returning to the caller.
     Some(unsafe { CStr::from_ptr(response) }.to_bytes().to_owned())
+}
+
+fn parse_string_option_response(
+    option: &'static str,
+    response: &str,
+) -> Result<String, TdJsonError> {
+    let response: Value = serde_json::from_str(response).map_err(TdJsonError::InvalidJson)?;
+    match response.get("@type").and_then(Value::as_str) {
+        Some("error") => {
+            let code = response
+                .get("code")
+                .and_then(Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok());
+            let message = response.get("message").and_then(Value::as_str);
+            match (code, message) {
+                (Some(code), Some(message)) => Err(TdJsonError::TdLib {
+                    code,
+                    message: message.to_owned(),
+                }),
+                _ => Err(TdJsonError::InvalidOptionResponse { option }),
+            }
+        }
+        Some("optionValueString") => response
+            .get("value")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or(TdJsonError::InvalidOptionResponse { option }),
+        _ => Err(TdJsonError::InvalidOptionResponse { option }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TdJsonError, parse_string_option_response};
+
+    #[test]
+    fn preserves_tdlib_error_details_from_string_option() {
+        let result = parse_string_option_response(
+            "version",
+            r#"{"@type":"error","code":400,"message":"The method can't be executed synchronously"}"#,
+        );
+
+        assert!(matches!(
+            result,
+            Err(TdJsonError::TdLib { code: 400, message })
+                if message == "The method can't be executed synchronously"
+        ));
+    }
 }
