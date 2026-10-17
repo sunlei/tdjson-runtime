@@ -39,18 +39,7 @@ if [[ "$actual_version" != "$expected_version" ]]; then
     exit 2
 fi
 
-case $(uname -s) in
-    Darwin)
-        parallelism=$(sysctl -n hw.logicalcpu)
-        ;;
-    Linux)
-        parallelism=$(getconf _NPROCESSORS_ONLN)
-        ;;
-    *)
-        printf 'unsupported build host: %s\n' "$(uname -s)" >&2
-        exit 2
-        ;;
-esac
+parallelism=$(getconf _NPROCESSORS_ONLN)
 
 export CC=${CC:-clang}
 export CXX=${CXX:-clang++}

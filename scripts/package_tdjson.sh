@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-if [[ $# -ne 7 ]]; then
-    printf 'usage: %s <install-dir> <source-dir> <version> <upstream-commit> <target> <compiler> <new-dist-dir>\n' "$0" >&2
+if [[ $# -ne 6 ]]; then
+    printf 'usage: %s <install-dir> <source-dir> <version> <upstream-commit> <target> <new-dist-dir>\n' "$0" >&2
     exit 2
 fi
 
@@ -12,8 +12,7 @@ source_dir=$2
 version=$3
 upstream_commit=$4
 target=$5
-compiler=$6
-dist_dir=$7
+dist_dir=$6
 short_commit=${upstream_commit:0:12}
 package_name="tdjson-v${version}-g${short_commit}-${target}"
 package_dir="$dist_dir/$package_name"
@@ -26,16 +25,25 @@ if [[ -e "$dist_dir" ]]; then
     exit 2
 fi
 
+# Release builds use build_tdjson.sh's default compiler. Do not use $CXX here: it may hold a
+# launcher command such as "sccache clang++".
+compiler=$(clang++ --version)
+compiler=${compiler%%$'\n'*}
+if [[ -z "$compiler" ]]; then
+    printf 'compiler reported an empty version string\n' >&2
+    exit 2
+fi
+
 mkdir -p "$package_dir/lib"
 cp "$source_dir/LICENSE_1_0.txt" "$package_dir/"
 
-jq -n \
+build_metadata=$(jq -n \
     --arg tdlib_version "$version" \
     --arg tdlib_commit "$upstream_commit" \
     --arg target "$target" \
     --arg compiler "$compiler" \
-    '{format_version: 1, tdlib_version: $tdlib_version, tdlib_commit: $tdlib_commit, target: $target, compiler: $compiler}' \
-    > "$package_dir/BUILD-METADATA.json"
+    '{format_version: 1, tdlib_version: $tdlib_version, tdlib_commit: $tdlib_commit, target: $target, compiler: $compiler}')
+printf '%s\n' "$build_metadata" > "$package_dir/BUILD-METADATA.json"
 
 case $(uname -s) in
     Darwin)
@@ -52,6 +60,7 @@ case $(uname -s) in
         cp -a "${libraries[@]}" "$package_dir/lib/"
         library=$(find "$package_dir/lib" -type f -name 'libtdjson*.dylib' -print -quit)
         otool -L "$library" > "$package_dir/DYNAMIC_DEPENDENCIES.txt"
+        sha256_command=(shasum -a 256)
         ;;
     Linux)
         libraries=("$install_dir"/lib/libtdjson.so*)
@@ -62,6 +71,7 @@ case $(uname -s) in
         cp -a "${libraries[@]}" "$package_dir/lib/"
         library=$(find "$package_dir/lib" -type f -name 'libtdjson.so.*' -print -quit)
         ldd "$library" > "$package_dir/DYNAMIC_DEPENDENCIES.txt"
+        sha256_command=(sha256sum)
         ;;
     *)
         printf 'unsupported packaging host: %s\n' "$(uname -s)" >&2
@@ -71,23 +81,13 @@ esac
 
 tar -C "$dist_dir" -cf - "$package_name" | zstd --threads=0 -19 -o "$archive"
 
-case $(uname -s) in
-    Darwin)
-        sha256=$(shasum -a 256 "$archive" | awk '{print $1}')
-        ;;
-    Linux)
-        sha256=$(sha256sum "$archive" | awk '{print $1}')
-        ;;
-esac
+sha256=$("${sha256_command[@]}" "$archive" | awk '{print $1}')
 
-jq -n \
+jq \
     --arg file "$(basename "$archive")" \
-    --arg tdlib_version "$version" \
-    --arg tdlib_commit "$upstream_commit" \
-    --arg target "$target" \
-    --arg compiler "$compiler" \
     --arg sha256 "$sha256" \
-    '{file: $file, tdlib_version: $tdlib_version, tdlib_commit: $tdlib_commit, target: $target, compiler: $compiler, sha256: $sha256}' \
+    '{file: $file} + del(.format_version) + {sha256: $sha256}' \
+    <<< "$build_metadata" \
     > "$metadata"
 
 printf '%s\n' "$archive"

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tdjson_runtime::{NativeTdJson, TdJsonError};
 
-const LOG_MARKER: &[u8] = b"tdjson-runtime-native-callback";
+const LOG_MARKER: &str = "tdjson-runtime-native-callback";
 static CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
@@ -52,14 +52,8 @@ fn loads_identity_callback_and_client_lifecycle() {
         Err(TdJsonError::LogCallbackAlreadyInstalled)
     ));
 
-    let response = tdjson
-        .execute(
-            br#"{"@type":"addLogMessage","verbosity_level":1,"text":"tdjson-runtime-native-callback"}"#,
-        )
-        .expect("addLogMessage must execute synchronously");
-    let response: Value = serde_json::from_slice(&response).expect("response must be valid JSON");
+    add_marker_log_message(&mut tdjson);
 
-    assert_eq!(response["@type"], "ok");
     assert_eq!(CALLBACK_COUNT.load(Ordering::Relaxed), 1);
 
     let client_id = tdjson.create_client_id();
@@ -105,15 +99,23 @@ fn loads_identity_callback_and_client_lifecycle() {
             .install_log_message_callback(1, record_log_message)
             .expect("callback ownership must be released on Drop");
     }
-    let response = second
-        .execute(
-            br#"{"@type":"addLogMessage","verbosity_level":1,"text":"tdjson-runtime-native-callback"}"#,
-        )
-        .expect("addLogMessage must execute after callback ownership is reacquired");
+    add_marker_log_message(&mut second);
+
+    assert_eq!(CALLBACK_COUNT.load(Ordering::Relaxed), 2);
+}
+
+fn add_marker_log_message(tdjson: &mut NativeTdJson) {
+    let request = serde_json::json!({
+        "@type": "addLogMessage",
+        "verbosity_level": 1,
+        "text": LOG_MARKER,
+    });
+    let response = tdjson
+        .execute(request.to_string().as_bytes())
+        .expect("addLogMessage must execute synchronously");
     let response: Value = serde_json::from_slice(&response).expect("response must be valid JSON");
 
     assert_eq!(response["@type"], "ok");
-    assert_eq!(CALLBACK_COUNT.load(Ordering::Relaxed), 2);
 }
 
 unsafe extern "C" fn record_log_message(_verbosity_level: c_int, message: *const c_char) {
@@ -124,7 +126,7 @@ unsafe extern "C" fn record_log_message(_verbosity_level: c_int, message: *const
     let message = unsafe { CStr::from_ptr(message) }.to_bytes();
     if message
         .windows(LOG_MARKER.len())
-        .any(|window| window == LOG_MARKER)
+        .any(|window| window == LOG_MARKER.as_bytes())
     {
         CALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
     }

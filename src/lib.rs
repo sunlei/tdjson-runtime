@@ -7,8 +7,7 @@ use std::os::raw::{c_char, c_double, c_int};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::Utf8Error;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use libloading::Library;
@@ -24,8 +23,10 @@ type TdSetLogMessageCallback = unsafe extern "C" fn(c_int, Option<TdLogMessageCa
 /// Callback type accepted by `td_set_log_message_callback`.
 pub type TdLogMessageCallback = unsafe extern "C" fn(c_int, *const c_char);
 
-static OWNER_ACTIVE: AtomicBool = AtomicBool::new(false);
-static TDJSON_BINDING: Mutex<Option<TdJsonBinding>> = Mutex::new(None);
+static TDJSON_STATE: Mutex<TdJsonState> = Mutex::new(TdJsonState {
+    binding: None,
+    owner_active: false,
+});
 
 /// Source identity reported by the loaded TDLib library.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -128,10 +129,6 @@ impl NativeTdJson {
     /// safe to execute in this process. The first successful call permanently binds the process to
     /// this exact path and keeps the library loaded until process exit. No code may bypass this
     /// owner and call the library's JSON C ABI directly.
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "the assertion checks an internal ownership invariant, not a recoverable load error"
-    )]
     pub unsafe fn load(path: impl AsRef<Path>) -> Result<Self, TdJsonError> {
         let path = path.as_ref();
         if !path.is_absolute() {
@@ -140,12 +137,12 @@ impl NativeTdJson {
             });
         }
 
-        let mut binding = TDJSON_BINDING.lock().unwrap();
-        if OWNER_ACTIVE.load(Ordering::Acquire) {
+        let mut state = TDJSON_STATE.lock().unwrap();
+        if state.owner_active {
             return Err(TdJsonError::OwnerAlreadyActive);
         }
 
-        let symbols = if let Some(binding) = binding.as_ref() {
+        let symbols = if let Some(binding) = state.binding.as_ref() {
             if binding.path != path {
                 return Err(TdJsonError::LibraryPathMismatch {
                     loaded_path: binding.path.clone(),
@@ -161,7 +158,7 @@ impl NativeTdJson {
                     source,
                 })?;
             let symbols = load_symbols(&library)?;
-            *binding = Some(TdJsonBinding {
+            state.binding = Some(TdJsonBinding {
                 _library: library,
                 path: path.to_path_buf(),
                 symbols,
@@ -169,11 +166,7 @@ impl NativeTdJson {
             symbols
         };
 
-        let owner_was_active = OWNER_ACTIVE.swap(true, Ordering::AcqRel);
-        assert!(
-            !owner_was_active,
-            "TDLib owner state changed while load was locked"
-        );
+        state.owner_active = true;
         Ok(Self {
             symbols,
             log_callback_installed: false,
@@ -215,11 +208,8 @@ impl NativeTdJson {
     /// Queries the version and full upstream commit reported by the loaded library.
     pub fn build_identity(&mut self) -> Result<TdLibBuildIdentity, TdJsonError> {
         Ok(TdLibBuildIdentity::new(
-            self.get_string_option("version", br#"{"@type":"getOption","name":"version"}"#)?,
-            self.get_string_option(
-                "commit_hash",
-                br#"{"@type":"getOption","name":"commit_hash"}"#,
-            )?,
+            self.get_string_option("version")?,
+            self.get_string_option("commit_hash")?,
         ))
     }
 
@@ -249,12 +239,9 @@ impl NativeTdJson {
         Ok(())
     }
 
-    fn get_string_option(
-        &mut self,
-        option: &'static str,
-        request: &'static [u8],
-    ) -> Result<String, TdJsonError> {
-        let response = self.execute(request)?;
+    fn get_string_option(&mut self, option: &'static str) -> Result<String, TdJsonError> {
+        let request = serde_json::json!({"@type": "getOption", "name": option}).to_string();
+        let response = self.execute(request.as_bytes())?;
         let response = std::str::from_utf8(&response).map_err(TdJsonError::InvalidUtf8)?;
         parse_string_option_response(option, response)
     }
@@ -269,8 +256,17 @@ impl Drop for NativeTdJson {
             self.log_callback_installed = false;
         }
 
-        OWNER_ACTIVE.store(false, Ordering::Release);
+        // A poisoned lock must not panic inside Drop; the guarded state is still consistent.
+        TDJSON_STATE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .owner_active = false;
     }
+}
+
+struct TdJsonState {
+    binding: Option<TdJsonBinding>,
+    owner_active: bool,
 }
 
 struct TdJsonBinding {
@@ -291,43 +287,29 @@ struct TdJsonSymbols {
 }
 
 fn load_symbols(library: &Library) -> Result<TdJsonSymbols, TdJsonError> {
-    // SAFETY: every type below mirrors the corresponding declaration in td_json_client.h. The
+    // SAFETY: every field type mirrors the corresponding declaration in td_json_client.h. The
     // process-global binding retains Library for longer than the copied function pointers.
-    let create_client_id: TdCreateClientId = *unsafe { library.get(b"td_create_client_id\0") }
-        .map_err(|source| TdJsonError::MissingSymbol {
-            symbol: "td_create_client_id",
-            source,
-        })?;
-    let send: TdSend =
-        *unsafe { library.get(b"td_send\0") }.map_err(|source| TdJsonError::MissingSymbol {
-            symbol: "td_send",
-            source,
-        })?;
-    let receive: TdReceive =
-        *unsafe { library.get(b"td_receive\0") }.map_err(|source| TdJsonError::MissingSymbol {
-            symbol: "td_receive",
-            source,
-        })?;
-    let execute: TdExecute =
-        *unsafe { library.get(b"td_execute\0") }.map_err(|source| TdJsonError::MissingSymbol {
-            symbol: "td_execute",
-            source,
-        })?;
-    let set_log_message_callback: TdSetLogMessageCallback = *unsafe {
-        library.get(b"td_set_log_message_callback\0")
-    }
-    .map_err(|source| TdJsonError::MissingSymbol {
-        symbol: "td_set_log_message_callback",
-        source,
-    })?;
-
     Ok(TdJsonSymbols {
-        create_client_id,
-        send,
-        receive,
-        execute,
-        set_log_message_callback,
+        create_client_id: unsafe { load_symbol(library, "td_create_client_id") }?,
+        send: unsafe { load_symbol(library, "td_send") }?,
+        receive: unsafe { load_symbol(library, "td_receive") }?,
+        execute: unsafe { load_symbol(library, "td_execute") }?,
+        set_log_message_callback: unsafe { load_symbol(library, "td_set_log_message_callback") }?,
     })
+}
+
+/// # Safety
+///
+/// `T` must match the C declaration of `name`, and `library` must outlive every copy of the
+/// returned value.
+unsafe fn load_symbol<T: Copy>(library: &Library, name: &'static str) -> Result<T, TdJsonError> {
+    // SAFETY: the caller guarantees the type and lifetime contract documented above.
+    unsafe { library.get::<T>(name) }
+        .map(|symbol| *symbol)
+        .map_err(|source| TdJsonError::MissingSymbol {
+            symbol: name,
+            source,
+        })
 }
 
 fn copy_native_response(response: *const c_char) -> Option<Vec<u8>> {
@@ -345,6 +327,7 @@ fn parse_string_option_response(
     response: &str,
 ) -> Result<String, TdJsonError> {
     let response: Value = serde_json::from_str(response).map_err(TdJsonError::InvalidJson)?;
+    let invalid = || TdJsonError::InvalidOptionResponse { option };
     match response.get("@type").and_then(Value::as_str) {
         Some("error") => {
             let code = response
@@ -352,20 +335,19 @@ fn parse_string_option_response(
                 .and_then(Value::as_i64)
                 .and_then(|code| i32::try_from(code).ok());
             let message = response.get("message").and_then(Value::as_str);
-            match (code, message) {
-                (Some(code), Some(message)) => Err(TdJsonError::TdLib {
+            Err(code
+                .zip(message)
+                .map_or_else(invalid, |(code, message)| TdJsonError::TdLib {
                     code,
                     message: message.to_owned(),
-                }),
-                _ => Err(TdJsonError::InvalidOptionResponse { option }),
-            }
+                }))
         }
         Some("optionValueString") => response
             .get("value")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .ok_or(TdJsonError::InvalidOptionResponse { option }),
-        _ => Err(TdJsonError::InvalidOptionResponse { option }),
+            .ok_or_else(invalid),
+        _ => Err(invalid()),
     }
 }
 

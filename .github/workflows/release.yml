@@ -35,21 +35,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
   quality:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-      - uses: taiki-e/install-action@nextest
-      - name: Check Rust crate
-        run: |
-          cargo fmt --check
-          cargo clippy --release --all-targets -- -D warnings
-          cargo nextest run --release --locked
-          cargo test --release --locked --doc
-      - name: Check shell syntax
-        run: bash -n scripts/*.sh
+    uses: ./.github/workflows/ci.yml
 
   build-linux:
     needs:
@@ -93,19 +79,13 @@ jobs:
             "${RUNNER_TEMP}/tdlib-source" \
             "${RUNNER_TEMP}/tdlib-install"
       - name: Package native artifact
-        shell: bash
         run: |
-          set -euo pipefail
-          compiler=$(clang++ --version)
-          compiler=${compiler%%$'\n'*}
-          test -n "${compiler}"
           scripts/package_tdjson.sh \
             "${RUNNER_TEMP}/tdlib-install" \
             "${RUNNER_TEMP}/tdlib-source" \
             "${{ needs.prepare.outputs.version }}" \
             "${{ needs.prepare.outputs.commit }}" \
             "${{ matrix.target }}" \
-            "${compiler}" \
             dist
       - uses: actions/upload-artifact@v7
         with:
@@ -137,9 +117,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          compiler=$(clang++ --version)
-          compiler=${compiler%%$'\n'*}
-          test -n "${compiler}"
           openssl_prefix=$(brew --prefix openssl@3)
           OPENSSL_LICENSE_FILE="${openssl_prefix}/LICENSE.txt" scripts/package_tdjson.sh \
             "${RUNNER_TEMP}/tdlib-install" \
@@ -147,7 +124,6 @@ jobs:
             "${{ needs.prepare.outputs.version }}" \
             "${{ needs.prepare.outputs.commit }}" \
             macos-arm64 \
-            "${compiler}" \
             dist
       - uses: actions/upload-artifact@v7
         with:
