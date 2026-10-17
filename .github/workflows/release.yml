@@ -181,7 +181,7 @@ jobs:
           printf 'library=%s\n' "${library}" >> "${GITHUB_OUTPUT}"
       - name: Install native test toolchain
         run: apt-get install -y --no-install-recommends clang curl
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
       - name: Test final Linux artifact
@@ -202,7 +202,7 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
       - name: Install consumer dependencies
